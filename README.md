@@ -161,4 +161,24 @@ function jsonp(data, callback) {
 
 ## Steam 연결하기
 
-Steam Web API Key와 SteamID64를 입력하고 저장합니다. 게임 이름을 입력하면 플레이 시간 계산에 활용할 수 있고, **최근 플레이 동기화**로 새 플레이 시간을 기록할 수 있습니다. 총 플레이 시간이 0.3시간(18분) 미만인 게임은 제외합니다.
+**Steam 연결하기**에서 SteamID64(17자리 숫자)만 입력하고 저장합니다. Steam API Key는 입력하지 않습니다. 키는 서버(Vercel 환경변수)에만 보관되고, 브라우저는 같은 도메인의 `/api/steam-owned-games`를 호출합니다. 구글 시트 저장 주소가 없어도 Steam 동기화는 동작하며, 저장 주소가 있으면 새 Steam 기록을 구글 시트에도 함께 저장합니다.
+
+게임 이름을 입력하면 플레이 시간 계산에 활용할 수 있고, **최근 플레이 동기화**로 새 플레이 시간을 기록할 수 있습니다. 총 플레이 시간이 0.3시간(18분) 미만인 게임은 제외합니다.
+
+- **SteamID64 찾기**: Steam 프로필 주소가 `.../profiles/7656...`라면 뒤의 17자리 숫자입니다.
+- **공개 설정 필수**: Steam 프로필 → **프로필 편집 → 개인정보 설정**에서 **게임 세부 정보**를 **공개**로 바꿔야 게임 목록과 플레이 시간을 가져올 수 있습니다. 비공개이면 게임 목록이 비어 있게 됩니다.
+
+> 위 Apps Script 코드의 `steamOwnedGames` 부분은 이제 사용하지 않습니다. 구글 시트 저장·가져오기에는 그대로 두어도 문제없습니다.
+
+## Vercel에 배포하기
+
+정적 화면(저장소 루트)과 Steam 서버리스 함수(`api/steam-owned-games.js`)가 같은 도메인에서 함께 제공됩니다. 별도 빌드 설정은 필요 없습니다.
+
+1. [Steam Web API Key 페이지](https://steamcommunity.com/dev/apikey)에서 키를 발급합니다.
+2. Vercel에서 **Add New → Project**로 이 저장소를 가져옵니다. Framework Preset은 **Other**, Build Command와 Output Directory는 비워 둡니다.
+3. **Settings → Environment Variables**에 `STEAM_API_KEY`를 추가합니다. (`.env.example` 참고)
+   - 다른 도메인에서 함수를 호출해야 할 때만 `ALLOWED_ORIGIN`(예: `https://example.com`)을 추가합니다. 같은 도메인에서만 쓰면 비워 둡니다.
+4. 배포(또는 환경변수 추가 후 **Redeploy**)합니다.
+5. 배포된 주소에서 SteamID64를 저장하고 **최근 플레이 동기화**를 눌러 확인합니다.
+
+함수 테스트(실제 Steam 호출 없음): `node --test tests/steam-owned-games.test.js` (Node 18 이상)

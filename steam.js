@@ -3,31 +3,47 @@
 // ==========================================
 
 const MIN_STEAM_SYNC_PLAYTIME_MINUTES = 18;
+const STEAM_API_BASE = '/api/steam-owned-games';
 
 function shouldSyncSteamGame(game) {
     return Number(game?.playtime_forever) >= MIN_STEAM_SYNC_PLAYTIME_MINUTES;
 }
 
-// 1. 스팀 인증 정보 로컬 브라우저 보관
+// 1. SteamID64 로컬 브라우저 보관 (API Key는 서버 환경변수에만 둡니다)
 function saveSteamCredentials() {
-    const keyVal = document.getElementById('steamApiKeyInput').value.trim();
     const idVal = document.getElementById('steamIdInput').value.trim();
 
-    if (!keyVal || !idVal) {
-        alert("API 키와 SteamID64를 모두 입력해 주세요.");
+    if (!/^\d{17}$/.test(idVal)) {
+        alert("SteamID64(17자리 숫자)를 입력해 주세요.");
         return;
     }
 
-    localStorage.setItem('user_steam_api_key', keyVal);
     localStorage.setItem('user_steam_id', idVal);
-    alert("스팀 연동 정보가 브라우저에 안전하게 저장되었습니다! 🔒");
+    alert("SteamID64가 브라우저에 저장되었습니다! 🔒");
 }
 
 function getSteamCredentials() {
     return {
-        apiKey: localStorage.getItem('user_steam_api_key') || '',
         steamId: localStorage.getItem('user_steam_id') || ''
     };
+}
+
+// 같은 도메인의 서버리스 함수로 Steam 보유 게임 목록(GetOwnedGames 응답)을 요청합니다.
+async function requestSteamOwnedGames(steamId) {
+    let response;
+    try {
+        response = await fetch(`${STEAM_API_BASE}?steamid=${encodeURIComponent(steamId)}`);
+    } catch (error) {
+        throw new Error('Steam 연동 서버와 통신하지 못했습니다. 인터넷 연결 또는 배포 상태를 확인해 주세요.');
+    }
+
+    let parsed = null;
+    try { parsed = await response.json(); } catch (error) { parsed = null; }
+
+    if (!response.ok || !parsed || parsed.error) {
+        throw new Error(parsed?.error || `Steam 게임 목록을 불러오지 못했습니다. (HTTP ${response.status})`);
+    }
+    return parsed;
 }
 
 function toggleSteamHelp() {
@@ -109,29 +125,12 @@ function titleSimilarity(leftTitle, rightTitle) {
     return 1 - previous[right.length] / longer;
 }
 
-function loadSteamOwnedGames() {
+async function loadSteamOwnedGames() {
     const creds = getSteamCredentials();
-    const webAppUrl = localStorage.getItem('user_local_web_app_url');
-    if (!creds.apiKey || !creds.steamId) return Promise.reject(new Error('Steam API 키와 SteamID64를 먼저 저장해 주세요.'));
-    if (!webAppUrl) return Promise.reject(new Error('기록 저장하기에 구글 웹 앱 주소를 먼저 저장해 주세요.'));
+    if (!creds.steamId) throw new Error('SteamID64를 먼저 저장해 주세요.');
 
-    return new Promise((resolve, reject) => {
-        const callbackName = `handleSteamLibrary_${Date.now()}`;
-        const cleanup = () => {
-            document.getElementById(callbackName)?.remove();
-            delete window[callbackName];
-        };
-        window[callbackName] = parsed => {
-            cleanup();
-            if (!parsed || parsed.error) reject(new Error(parsed?.error || 'Steam 게임 목록을 불러오지 못했습니다.'));
-            else resolve(parsed.response?.games || []);
-        };
-        const script = document.createElement('script');
-        script.id = callbackName;
-        script.src = `${webAppUrl}?action=steamOwnedGames&key=${encodeURIComponent(creds.apiKey)}&steamid=${encodeURIComponent(creds.steamId)}&callback=${callbackName}`;
-        script.onerror = () => { cleanup(); reject(new Error('구글 웹 앱 통신 중 오류가 발생했습니다.')); };
-        document.body.appendChild(script);
-    });
+    const parsed = await requestSteamOwnedGames(creds.steamId);
+    return parsed.response?.games || [];
 }
 
 async function bulkLinkSteamGames() {
@@ -211,26 +210,9 @@ async function autoFillPrevTime(gameNameInput) {
 
     // 스팀 계정에서 최신 시간 실시간 자동 바인딩
     const steamCreds = getSteamCredentials();
-    if (steamCreds.apiKey && steamCreds.steamId) {
+    if (steamCreds.steamId) {
         try {
-            const targetSteamUrl = `https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/?key=${steamCreds.apiKey}&steamid=${steamCreds.steamId}&include_appinfo=1&format=json`;
-            const proxyUrls = [
-                `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetSteamUrl)}`,
-                `https://corsproxy.io/?${encodeURIComponent(targetSteamUrl)}`
-            ];
-
-            let parsed = null;
-            for (const proxy of proxyUrls) {
-                try {
-                    const res = await fetch(proxy);
-                    if (res.ok) {
-                        parsed = await res.json();
-                        if (parsed && (parsed.response || parsed.contents)) break;
-                    }
-                } catch(e) {}
-            }
-
-            if (parsed && parsed.contents) parsed = JSON.parse(parsed.contents);
+            const parsed = await requestSteamOwnedGames(steamCreds.steamId);
 
             if (parsed && parsed.response && parsed.response.games) {
                 const foundGame = parsed.response.games.find(g => g.name.toLowerCase() === trimmed);
@@ -259,106 +241,87 @@ function calculateTimeDifference() {
 }
 
 
-// 3. 원클릭 스팀 최근 플레이 실시간 동기화 (구글 백엔드 JSONP 연동 - CORS 회피)
-function syncRecentSteamPlaytime() {
+// 3. 원클릭 스팀 최근 플레이 실시간 동기화 (같은 도메인 서버리스 함수 연동)
+async function syncRecentSteamPlaytime() {
     const creds = getSteamCredentials();
-    if (!creds.apiKey || !creds.steamId) {
-        alert("먼저 스팀 API 키와 SteamID64를 입력하고 저장해 주세요!");
-        return;
-    }
-
-    const webAppUrl = localStorage.getItem('user_local_web_app_url');
-    if (!webAppUrl) {
-        alert("2번 '양방향 저장 연동'에 구글 웹 앱 URL 주소를 먼저 저장해 주세요!\n구글 서버를 통해 스팀 데이터를 안전하게 불러옵니다.");
+    if (!creds.steamId) {
+        alert("먼저 SteamID64를 입력하고 저장해 주세요!");
         return;
     }
 
     const syncBtns = document.querySelectorAll('button[onclick*="syncRecentSteamPlaytime"]');
     syncBtns.forEach(b => { b.disabled = true; b.innerText = "⏳ 스팀 통신 중..."; });
 
-    // 고유 콜백 함수 이름 생성
-    const callbackName = "handleSteamResponse_" + Date.now();
-    
-    // 응답 수신 핸들러 등록
-    window[callbackName] = function(parsed) {
-        // 임시 스크립트 태그 및 콜백 함수 정리
-        const scriptEl = document.getElementById(callbackName);
-        if (scriptEl) scriptEl.remove();
-        delete window[callbackName];
+    let parsed = null;
+    let requestError = null;
+    try {
+        parsed = await requestSteamOwnedGames(creds.steamId);
+    } catch (error) {
+        requestError = error;
+    } finally {
         syncBtns.forEach(b => { b.disabled = false; b.innerText = "🔄 최근 플레이 동기화"; });
+    }
 
-        if (!parsed || parsed.error) {
-            alert("스팀 연동 실패: " + (parsed?.error || "데이터를 불러오지 못했습니다."));
-            return;
+    if (requestError) {
+        alert("스팀 연동 실패: " + (requestError.message || "데이터를 불러오지 못했습니다."));
+        return;
+    }
+
+    const games = parsed.response?.games || [];
+    if (games.length === 0) {
+        alert("스팀 라이브러리 데이터를 가져오지 못했습니다. Steam 프로필의 '게임 세부 정보'가 공개인지, SteamID64가 맞는지 확인해 주세요.");
+        return;
+    }
+
+    let updatedCount = 0;
+    let skippedShortPlaytimeCount = 0;
+    const todayStr = new Date().toISOString().split('T')[0];
+
+    for (const game of games) {
+        if (!shouldSyncSteamGame(game)) {
+            skippedShortPlaytimeCount++;
+            continue;
         }
 
-        const games = parsed.response?.games || [];
-        if (games.length === 0) {
-            alert("스팀 라이브러리 데이터를 가져오지 못했습니다. 프로필 공개 설정 및 스팀 키를 확인해 주세요.");
-            return;
+        const name = game.name;
+        const steamAppId = String(game.appid || '');
+        const currentTotalSteamHours = parseFloat((game.playtime_forever / 60).toFixed(1));
+
+        // Steam 동기화는 제목이 아니라 Steam AppID가 같은 기록만 합산합니다.
+        const appIdRecords = steamAppId
+            ? localEvents.filter(e => String(e.extendedProps.steamAppId || '') === steamAppId)
+            : [];
+        const existingRecords = appIdRecords;
+        const recordsWithSteamTotal = existingRecords
+            .filter(record => record.extendedProps.steamTotal !== null && record.extendedProps.steamTotal !== '' && Number.isFinite(Number(record.extendedProps.steamTotal)))
+            .sort((first, second) => {
+                const firstDate = first.extendedProps.startDate || '';
+                const secondDate = second.extendedProps.startDate || '';
+                return firstDate.localeCompare(secondDate) || first.id.localeCompare(second.id);
+            });
+        const lastRecordedSteamTotal = recordsWithSteamTotal.length
+            ? Number(recordsWithSteamTotal[recordsWithSteamTotal.length - 1].extendedProps.steamTotal)
+            : null;
+        const recordedTotalHours = lastRecordedSteamTotal ?? existingRecords.reduce((sum, e) => sum + e.extendedProps.time, 0);
+        const diffHours = parseFloat((currentTotalSteamHours - recordedTotalHours).toFixed(1));
+
+        if (diffHours > 0) {
+            // 동기화할 때마다 하루 기록을 새로 만들어 정확한 증가 시간을 보존합니다.
+            const displayName = existingRecords[0]?.title || name;
+            const newGame = createGameObj(displayName, todayStr, todayStr, 'steam', diffHours, 'x', '스팀 동기화 세션', '', false, steamAppId, currentTotalSteamHours);
+            localEvents.push(newGame);
+            if (localStorage.getItem('user_local_web_app_url')) sendDataToGoogleSheet(newGame.extendedProps);
+            updatedCount++;
         }
+    }
 
-        let updatedCount = 0;
-        let skippedShortPlaytimeCount = 0;
-        const todayStr = new Date().toISOString().split('T')[0];
-
-        for (const game of games) {
-            if (!shouldSyncSteamGame(game)) {
-                skippedShortPlaytimeCount++;
-                continue;
-            }
-
-            const name = game.name;
-            const steamAppId = String(game.appid || '');
-            const currentTotalSteamHours = parseFloat((game.playtime_forever / 60).toFixed(1));
-
-            // Steam 동기화는 제목이 아니라 Steam AppID가 같은 기록만 합산합니다.
-            const appIdRecords = steamAppId
-                ? localEvents.filter(e => String(e.extendedProps.steamAppId || '') === steamAppId)
-                : [];
-            const existingRecords = appIdRecords;
-            const recordsWithSteamTotal = existingRecords
-                .filter(record => record.extendedProps.steamTotal !== null && record.extendedProps.steamTotal !== '' && Number.isFinite(Number(record.extendedProps.steamTotal)))
-                .sort((first, second) => {
-                    const firstDate = first.extendedProps.startDate || '';
-                    const secondDate = second.extendedProps.startDate || '';
-                    return firstDate.localeCompare(secondDate) || first.id.localeCompare(second.id);
-                });
-            const lastRecordedSteamTotal = recordsWithSteamTotal.length
-                ? Number(recordsWithSteamTotal[recordsWithSteamTotal.length - 1].extendedProps.steamTotal)
-                : null;
-            const recordedTotalHours = lastRecordedSteamTotal ?? existingRecords.reduce((sum, e) => sum + e.extendedProps.time, 0);
-            const diffHours = parseFloat((currentTotalSteamHours - recordedTotalHours).toFixed(1));
-
-            if (diffHours > 0) {
-                // 동기화할 때마다 하루 기록을 새로 만들어 정확한 증가 시간을 보존합니다.
-                const displayName = existingRecords[0]?.title || name;
-                const newGame = createGameObj(displayName, todayStr, todayStr, 'steam', diffHours, 'x', '스팀 동기화 세션', '', false, steamAppId, currentTotalSteamHours);
-                localEvents.push(newGame);
-                sendDataToGoogleSheet(newGame.extendedProps);
-                updatedCount++;
-            }
-        }
-
-        if (updatedCount > 0) {
-            refreshUI();
-            saveToLocalStorage();
-            const skippedMessage = skippedShortPlaytimeCount > 0 ? `\n(총 플레이 0.3시간 미만 게임 ${skippedShortPlaytimeCount}개 제외)` : '';
-            alert(`🎉 총 ${updatedCount}개 스팀 게임의 플레이 기록이 동기화되었습니다!${skippedMessage}`);
-        } else {
-            const skippedMessage = skippedShortPlaytimeCount > 0 ? `\n(총 플레이 0.3시간 미만 게임 ${skippedShortPlaytimeCount}개 제외)` : '';
-            alert(`이미 모든 스팀 게임의 최신 플레이타임이 반영되어 있습니다! (새로 늘어난 시간 없음)${skippedMessage}`);
-        }
-    };
-
-    // fetch 대신 <script> 태그를 동적으로 생성하여 주입 (CORS 차단 우회)
-    const requestUrl = `${webAppUrl}?action=steamOwnedGames&key=${encodeURIComponent(creds.apiKey)}&steamid=${encodeURIComponent(creds.steamId)}&callback=${callbackName}`;
-    const script = document.createElement('script');
-    script.id = callbackName;
-    script.src = requestUrl;
-    script.onerror = function() {
-        syncBtns.forEach(b => { b.disabled = false; b.innerText = "🔄 최근 플레이 동기화"; });
-        alert("구글 웹 앱 통신 중 오류가 발생했습니다. 웹 앱 배포 URL 및 권한 설정을 확인해 주세요.");
-    };
-    document.body.appendChild(script);
+    if (updatedCount > 0) {
+        refreshUI();
+        saveToLocalStorage();
+        const skippedMessage = skippedShortPlaytimeCount > 0 ? `\n(총 플레이 0.3시간 미만 게임 ${skippedShortPlaytimeCount}개 제외)` : '';
+        alert(`🎉 총 ${updatedCount}개 스팀 게임의 플레이 기록이 동기화되었습니다!${skippedMessage}`);
+    } else {
+        const skippedMessage = skippedShortPlaytimeCount > 0 ? `\n(총 플레이 0.3시간 미만 게임 ${skippedShortPlaytimeCount}개 제외)` : '';
+        alert(`이미 모든 스팀 게임의 최신 플레이타임이 반영되어 있습니다! (새로 늘어난 시간 없음)${skippedMessage}`);
+    }
 }

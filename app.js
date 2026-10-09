@@ -856,11 +856,9 @@ document.addEventListener('DOMContentLoaded', function() {
     let savedWebAppUrl = localStorage.getItem('user_local_web_app_url');
     if (savedWebAppUrl) { document.getElementById('webAppUrlInput').value = savedWebAppUrl; }
 
-    const savedSteamKey = localStorage.getItem('user_steam_api_key');
+    // Steam API Key는 이제 서버 환경변수에만 둡니다. 예전에 저장한 키는 브라우저에서 지웁니다.
+    localStorage.removeItem('user_steam_api_key');
     const savedSteamId = localStorage.getItem('user_steam_id');
-    if (savedSteamKey && document.getElementById('steamApiKeyInput')) {
-        document.getElementById('steamApiKeyInput').value = savedSteamKey;
-    }
     if (savedSteamId && document.getElementById('steamIdInput')) {
         document.getElementById('steamIdInput').value = savedSteamId;
     }
